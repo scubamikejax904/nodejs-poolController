@@ -152,6 +152,7 @@ export class EquipmentStateMessage {
                 // so v3 systems (e.g. i10PS shared) are decoded with the correct nibble order.
                 if (msg.payload.length >= 44) {
                     sys.equipment.controllerFirmware = (msg.extractPayloadByte(42) + (msg.extractPayloadByte(43) / 1000)).toString();
+                    (sys.board as IntelliCenterBoard).applyV3ValueMapOverrides();
                 }
                 // Master = 13-14
                 // EXP1 = 15-16

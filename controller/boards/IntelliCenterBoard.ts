@@ -568,6 +568,15 @@ export class IntelliCenterBoard extends SystemBoard {
         this._configQueue.close();
         return super.stopAsync();
     }
+    private _v3ValueMapsApplied = false;
+    public applyV3ValueMapOverrides(): void {
+        if (this._v3ValueMapsApplied) return;
+        if (!sys.equipment.isIntellicenterV3) return;
+        this._v3ValueMapsApplied = true;
+        this.valueMaps.circuitFunctions.merge([
+            [11, { name: 'floorcleaner', desc: 'Floor Cleaner 1', body: 2 }]
+        ]);
+    }
     public initExpansionModules(ocp0A: number, ocp0B: number, xcp1A: number, xcp1B: number, xcp2A: number, xcp2B: number, xcp3A: number, xcp3B: number) {
         state.equipment.controllerType = 'intellicenter';
         let inv = { bodies: 0, circuits: 0, valves: 0, shared: false, dual: false, covers: 0, chlorinators: 0, chemControllers: 0 };
@@ -927,6 +936,7 @@ class IntelliCenterConfigQueue extends ConfigQueue {
     public _processing: boolean = false;
     public _newRequest: boolean = false;
     public _failed: boolean = false;
+    private _savedFirmwareVersion: string = sys.equipment.controllerFirmware || '';
     private static readonly WATCHDOG_TIMEOUT_MS = 120000;
     private static readonly WATCHDOG_POLL_MS = 5000;
     private _watchdogTimer?: NodeJS.Timeout;
@@ -1078,6 +1088,22 @@ class IntelliCenterConfigQueue extends ConfigQueue {
     }
     public queueChanges(ver: ConfigVersion) {
         let curr: ConfigVersion = sys.configVersion;
+
+        // Detect firmware version change (e.g., v1→v3). The constructor captured
+        // the persisted equipment.softwareVersion before Action 204 overwrites it.
+        // If the live firmware differs, categories with version-specific parsing
+        // must be re-fetched even when their OCP version numbers haven't changed.
+        const currentFw = sys.equipment.controllerFirmware || '';
+        const fwChanged = currentFw !== this._savedFirmwareVersion && currentFw.length > 0;
+        if (fwChanged) {
+            logger.info(`Firmware version changed (${this._savedFirmwareVersion || 'unknown'} → ${currentFw}), forcing config refresh for affected categories`);
+            curr.circuits = 0;
+            curr.options = 0;
+            curr.general = 0;
+            curr.schedules = 0;
+            curr.pumps = 0;
+            this._savedFirmwareVersion = currentFw;
+        }
 
         if (this._processing) {
             if (curr.hasChanges(ver)) this._newRequest = true;
