@@ -36,6 +36,7 @@ export class IntelliCenterBoard extends SystemBoard {
     private static readonly REGISTRATION_STATUS_TIMEOUT_MS = 2500;
     private static readonly REGISTRATION_STATUS_POLL_MS = 100;
     private static readonly REGISTRATION_MAX_ATTEMPTS = 4;
+    private static readonly STATE_POLL_INTERVAL_MS = 4000;
     public needsConfigChanges: boolean = false;
     constructor(system: PoolSystem) {
         super(system);
@@ -279,6 +280,8 @@ export class IntelliCenterBoard extends SystemBoard {
     private _announceDeviceLastSentMs: number = 0;
     private _registrationBootstrapStarted: boolean = false;
     private _runtimeRegistrationAddress?: number;
+    private _statePollTimer?: NodeJS.Timeout;
+    private _statePollInFlight: boolean = false;
     public system: IntelliCenterSystemCommands = new IntelliCenterSystemCommands(this);
     public circuits: IntelliCenterCircuitCommands = new IntelliCenterCircuitCommands(this);
     public features: IntelliCenterFeatureCommands = new IntelliCenterFeatureCommands(this);
@@ -328,6 +331,41 @@ export class IntelliCenterBoard extends SystemBoard {
         }
         this._announceDeviceTickInFlight = false;
         this._announceDeviceLastSentMs = 0;
+    }
+    private startStatePoll(): void {
+        // v3.004+: Action 2 and Action 204 don't carry reliable feature/schedule state,
+        // so we poll the OCP for Action 30 [15,...] (circuit+feature+group+schedule state)
+        // at a rate matching v1.x's Action 204 frequency (~4s).
+        if (!sys.equipment.isIntellicenterV3) return;
+        if (this._statePollTimer) return;
+        this._statePollTimer = setInterval(async () => {
+            if (this._statePollInFlight) return;
+            if (this._configQueue._processing) return;
+            this._statePollInFlight = true;
+            try {
+                const source = this.getRegistrationAddress();
+                const out = Outbound.create({
+                    source,
+                    dest: 16,
+                    action: 222,
+                    payload: [15, 0],
+                    retries: 0,
+                    response: Response.create({ dest: source, action: 30, payload: [15] })
+                });
+                await out.sendAsync();
+            } catch (err) {
+                // Non-critical — next poll will retry
+            } finally {
+                this._statePollInFlight = false;
+            }
+        }, IntelliCenterBoard.STATE_POLL_INTERVAL_MS);
+    }
+    private stopStatePoll(): void {
+        if (this._statePollTimer) {
+            clearInterval(this._statePollTimer);
+            this._statePollTimer = undefined;
+        }
+        this._statePollInFlight = false;
     }
     private async sleepAsync(ms: number): Promise<void> {
         return await new Promise(resolve => setTimeout(resolve, ms));
@@ -563,6 +601,7 @@ export class IntelliCenterBoard extends SystemBoard {
     }
     public async stopAsync() {
         this.stopAnnounceDeviceInterval();
+        this.stopStatePoll();
         this._registrationBootstrapStarted = false;
         this._runtimeRegistrationAddress = undefined;
         this._configQueue.close();
@@ -688,6 +727,7 @@ export class IntelliCenterBoard extends SystemBoard {
         setTimeout(() => this.checkConfiguration(), 0);
         // Start v3 announce loop once we're initialized/running.
         this.startAnnounceDeviceInterval();
+        this.startStatePoll();
     }
     public processMasterModules(modules: ExpansionModuleCollection, ocpA: number, ocpB: number, inv?) {
         // Map the expansion panels to their specific types through the valuemaps.  Sadly this means that
@@ -3371,7 +3411,7 @@ class IntelliCenterPumpCommands extends PumpCommands {
             else {
                 // All of these pumps potentially have circuits.
                 // Add in all the circuits
-                if (data.circuits === 'undefined') {
+                if (typeof data.circuits === 'undefined') {
                     // The endpoint isn't changing the circuits and is just setting the attributes.
                     for (let i = 0; i < 8; i++) {
                         let circ = pump.circuits.getItemByIndex(i, false, { circuit: 255 });

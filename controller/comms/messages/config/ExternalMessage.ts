@@ -724,11 +724,19 @@ export class ExternalMessage {
         }
         else {
             feature.freeze = msg.extractPayloadByte(4) > 0;
-            feature.dontStop = msg.extractPayloadByte(8) > 0;
+            fstate.freezeProtect = feature.freeze;
             fstate.name = feature.name = msg.extractPayloadString(9, 16);
             fstate.type = feature.type = type;
-            feature.eggTimer = (msg.extractPayloadByte(6) * 60) + msg.extractPayloadByte(7);
             fstate.showInFeatures = feature.showInFeatures = msg.extractPayloadByte(5) > 0;
+            let hours = msg.extractPayloadByte(6);
+            const isV3 = sys.controllerType === ControllerType.IntelliCenter && sys.equipment.isIntellicenterV3;
+            if (isV3 && hours >= 24) {
+                feature.dontStop = true;
+                feature.eggTimer = 1440;
+            } else {
+                feature.dontStop = isV3 ? false : msg.extractPayloadByte(8) > 0;
+                feature.eggTimer = (hours * 60) + msg.extractPayloadByte(7);
+            }
         }
         state.emitEquipmentChanges();
         msg.isProcessed = true;
@@ -739,10 +747,18 @@ export class ExternalMessage {
         let cstate = state.circuits.getItemById(circuitId, false);
         circuit.showInFeatures = msg.extractPayloadByte(5) > 0;
         circuit.freeze = msg.extractPayloadByte(4) > 0;
+        cstate.freezeProtect = circuit.freeze;
         circuit.name = msg.extractPayloadString(10, 16);
         circuit.type = msg.extractPayloadByte(3);
-        circuit.eggTimer = (msg.extractPayloadByte(7) * 60) + msg.extractPayloadByte(8);
-        circuit.showInFeatures = msg.extractPayloadByte(5) > 0;
+        let hours = msg.extractPayloadByte(7);
+        const isV3 = sys.controllerType === ControllerType.IntelliCenter && sys.equipment.isIntellicenterV3;
+        if (isV3 && hours >= 24) {
+            circuit.dontStop = true;
+            circuit.eggTimer = 1440;
+        } else {
+            if (isV3) circuit.dontStop = false;
+            circuit.eggTimer = (hours * 60) + msg.extractPayloadByte(8);
+        }
         cstate.type = circuit.type;
         cstate.showInFeatures = circuit.showInFeatures;
         cstate.name = circuit.name;
