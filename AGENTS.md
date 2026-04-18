@@ -506,41 +506,25 @@ Always prefix with `#` and packet ID.
 
 **Problem:** When njsPC sends Action 168 to control circuits on v3.004+, OCP accepts it briefly then reverts the state. The Wireless remote uses Action 184, which OCP accepts permanently.
 
-**Solution:** 
-- Each circuit has a unique `targetId` (16-bit value stored in poolConfig.json)
-- njsPC learns Target IDs from OCP Action 184 broadcasts
-- When controlling circuits, njsPC sends Action 184 with the learned Target ID
+**Solution (indexed outbound control):** njsPC does **not** persist per-circuit target IDs. Outbound control uses a fixed Wireless-style frame:
+- **Circuits:** channel `0x688F` (104,143), byte 2 = `circuitId - 1`, format 255, target `0xA8ED` (168,237) — the shared control primitive — state in byte 6.
+- **Features:** channel `0xE89D` (232,157), index derived from feature id, same fixed target pattern (see `IntelliCenterBoard` feature path).
+- **Bodies (Pool/Spa):** multi-step Action 184 sequence with dedicated targets (body select / context / toggle), not the simple indexed circuit frame.
 
 **Action 184 Payload (10 bytes):**
 ```
-[channelHi, channelLo, seq, format, targetHi, targetLo, state, 0, 0, 0]
- ├─ Channel: 104,143 (default) or circuit-specific (e.g., 108,225 for Pool)
- ├─ Target: Circuit's unique ID (e.g., 168,237 for Spa, 108,225 for Pool)
- └─ State: 0=OFF, 1=ON
+[channelHi, channelLo, seqOrIndex, format, targetHi, targetLo, state, 0, 0, 0]
+ ├─ Channel: family-specific (e.g. 104,143 for indexed circuits; 232,157 for features; other families on the bus)
+ ├─ Byte 2: circuit index (circuits), sequence, or other selector depending on channel/target family
+ ├─ Target: often 168,237 (0xA8ED) for the indexed circuit/feature primitive; bodies use additional targets (e.g. 114,145 / 212,182 / 168,237) in sequence
+ └─ State: 0=OFF, 1=ON (meaning depends on target family)
 ```
 
-**Known Target IDs (user's system):**
-| Circuit | Target ID | Hex |
-|---------|-----------|-----|
-| Spa (circuit 1) | 168,237 | 0xA8ED |
-| Pool (circuit 6) | 108,225 | 0x6CE1 |
-| Body status | 212,182 | 0xD4B6 (not a circuit) |
-
-**Learning strategies:**
-1. **Channel=Target pattern**: When bytes 0-1 equal bytes 4-5, identifies circuit
-2. **Unique state match**: When only one circuit matches broadcast state (ON/OFF)
-3. **State correlation**: Schedule/automation triggers state change → learn mapping
-
-**Unknowns (to investigate):**
-- How Target IDs are assigned (hardware serial? config order?)
-- Whether Target IDs can change (suspected: stable)
-- Full decode of body status (212,182) payload
+**Inbound Action 184:** OCP and panels broadcast many 184 families; `EquipmentStateMessage` case 184 is intentionally a no-op (no state mutation from inbound 184). Use Action 30 / Action 2 / authoritative paths for state.
 
 **Code locations:**
-- `Circuit.targetId` property: `controller/Equipment.ts`
-- Learn from broadcasts: `EquipmentStateMessage.ts` (case 184)
-- Send commands: `IntelliCenterBoard.createAction184Message()`
-- Circuit control: `IntelliCenterBoard.setCircuitStateAsync()`
+- Circuit/feature/body send: `IntelliCenterBoard.setCircuitStateAsync()`, `setFeatureStateAsync()`, `sendV3BodyControlSequenceAsync()`
+- Inbound router: `EquipmentStateMessage.ts` (case 184)
 
 ### 22. v3.004+ Action 168 vs Action 30 Offset Difference (CRITICAL)
 **Rule:** v3.004 Wireless Action 168 type 0 has DIFFERENT byte offsets than Action 30 type 0!

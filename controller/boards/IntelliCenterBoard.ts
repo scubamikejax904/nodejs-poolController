@@ -4005,6 +4005,42 @@ class IntelliCenterBodyCommands extends BodyCommands {
         // remove "nochange" which is not a valid body mode selection in dashPanel
         return sources.filter(s => s && (s as any).name !== 'nochange');
     }
+    public getHeatModesV2(bodyId: number) {
+        sys.board.heaters.updateHeaterServices();
+        let heatModes = [];
+        let heatTypes = (sys.board.heaters as IntelliCenterHeaterCommands).getInstalledHeaterTypesV2(bodyId);
+        heatModes.push(this.board.valueMaps.heatSources.transformByName('off'));
+        if (heatTypes.hybrid > 0) {
+            heatModes.push(this.board.valueMaps.heatSources.transformByName('hybheat'));
+            heatModes.push(this.board.valueMaps.heatSources.transformByName('hybheatpump'));
+            heatModes.push(this.board.valueMaps.heatSources.transformByName('hybhybrid'));
+            heatModes.push(this.board.valueMaps.heatSources.transformByName('hybdual'));
+        }
+        if (heatTypes.gas > 0) heatModes.push(this.board.valueMaps.heatSources.transformByName('heater'));
+        if (heatTypes.mastertemp > 0) heatModes.push(this.board.valueMaps.heatSources.transformByName('mtheater'));
+        if (heatTypes.solar > 0) {
+            heatModes.push(this.board.valueMaps.heatSources.transformByName('solar'));
+            if (heatTypes.total > 1) {
+                let sp = { ...this.board.valueMaps.heatSources.transformByName('solarpref'), desc: 'Solar Preferred' };
+                heatModes.push(sp);
+            }
+        }
+        if (heatTypes.ultratemp > 0) {
+            heatModes.push(this.board.valueMaps.heatSources.transformByName('ultratemp'));
+            if (heatTypes.total > 1) {
+                let up = { ...this.board.valueMaps.heatSources.transformByName('ultratemppref'), desc: 'UltraTemp Preferred' };
+                heatModes.push(up);
+            }
+        }
+        if (heatTypes.heatpump > 0) {
+            heatModes.push(this.board.valueMaps.heatSources.transformByName('heatpump'));
+            if (heatTypes.total > 1) {
+                let hp = { ...this.board.valueMaps.heatSources.transformByName('heatpumppref'), desc: 'Heat Pump Preferred' };
+                heatModes.push(hp);
+            }
+        }
+        return heatModes;
+    }
 }
 class IntelliCenterScheduleCommands extends ScheduleCommands {
     _lastScheduleCheck: number = 0;
@@ -4226,6 +4262,36 @@ class IntelliCenterHeaterCommands extends HeaterCommands {
             if (heaterBody === 22) return requestedBody === 4; // Body 4 circuit
 
             // Fallback to existing generic formats.
+            return requestedBody === heaterBody + 1 || requestedBody === heaterBody;
+        };
+
+        for (let i = 0; i < heaters.length; i++) {
+            const heater = heaters[i];
+            if (typeof body !== 'undefined' && typeof heater.body !== 'undefined') {
+                if (!matchesBody(heater.body, body)) continue;
+            }
+            const type = types.find(elem => elem.val === heater.type);
+            if (typeof type !== 'undefined') {
+                if (inst[type.name] === 'undefined') inst[type.name] = 0;
+                inst[type.name] = inst[type.name] + 1;
+                if (heater.coolingEnabled === true && type.hasCoolSetpoint === true) inst['hasCoolSetpoint'] = true;
+                inst.total++;
+            }
+        }
+        return inst;
+    }
+    public getInstalledHeaterTypesV2(body?: number): any {
+        const heaters = sys.heaters.get();
+        const types = sys.board.valueMaps.heaterTypes.toArray();
+        const inst: any = { total: 0 };
+        for (let i = 0; i < types.length; i++) if (types[i].name !== 'none') inst[types[i].name] = 0;
+
+        const matchesBody = (heaterBody: number, requestedBody: number): boolean => {
+            if (heaterBody === 32) return requestedBody <= 2;
+            if (heaterBody === 6) return requestedBody === 1;
+            if (heaterBody === 1) return requestedBody === 2;
+            if (heaterBody === 12) return requestedBody === 3;
+            if (heaterBody === 22) return requestedBody === 4;
             return requestedBody === heaterBody + 1 || requestedBody === heaterBody;
         };
 

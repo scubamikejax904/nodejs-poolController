@@ -1854,6 +1854,9 @@ export class BodyCommands extends BoardCommands {
         }
         return heatModes;
     }
+    public getHeatModesV2(bodyId: number) {
+        return this.getHeatModes(bodyId);
+    }
     public getPoolStates(): BodyTempState[] {
         let arrPools = [];
         for (let i = 0; i < state.temps.bodies.length; i++) {

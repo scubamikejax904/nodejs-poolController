@@ -130,6 +130,9 @@ export class ConfigRoute {
         app.get('/config/body/:body/heatModes', (req, res) => {
             return res.status(200).send(sys.bodies.getItemById(parseInt(req.params.body, 10)).getHeatModes());
         });
+        app.get('/v2/config/body/:body/heatModes', (req, res) => {
+            return res.status(200).send(sys.board.bodies.getHeatModesV2(parseInt(req.params.body, 10)));
+        });
         app.get('/config/circuit/names', (req, res) => {
             let circuitNames = sys.board.circuits.getCircuitNames();
             return res.status(200).send(circuitNames);
@@ -370,6 +373,30 @@ export class ConfigRoute {
                 };
                 // We only need the servers data when the controller is a Nixie controller.  We don't need to
                 // wait for this information if we are dealing with an OCP.
+                if (sys.controllerType === ControllerType.Nixie) opts.servers = await sys.ncp.getREMServers();
+                return res.status(200).send(opts);
+            } catch (err) { next(err); }
+        });
+        app.get('/v2/config/options/heaters', async (req, res, next) => {
+            try {
+                sys.board.heaters.updateHeaterServices();
+                let bodyHeatModes = {};
+                for (let i = 0; i < sys.bodies.length; i++) {
+                    let body = sys.bodies.getItemByIndex(i);
+                    bodyHeatModes[body.id] = sys.board.bodies.getHeatModesV2(body.id);
+                }
+                let opts = {
+                    tempUnits: sys.board.valueMaps.tempUnits.transform(state.temps.units),
+                    bodies: sys.board.bodies.getBodyAssociations(),
+                    maxHeaters: sys.equipment.maxHeaters,
+                    heaters: sys.heaters.get(),
+                    heaterTypes: sys.board.valueMaps.heaterTypes.toArray(),
+                    equipmentMasters: sys.board.valueMaps.equipmentMaster.toArray(),
+                    bodyHeatModes: bodyHeatModes,
+                    coolDownDelay: sys.general.options.cooldownDelay,
+                    servers: [],
+                    rs485ports: await conn.listInstalledPorts()
+                };
                 if (sys.controllerType === ControllerType.Nixie) opts.servers = await sys.ncp.getREMServers();
                 return res.status(200).send(opts);
             } catch (err) { next(err); }

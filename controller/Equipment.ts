@@ -1190,6 +1190,7 @@ export class Body extends EqItem {
     public get capacityUnits(): number | any { return this.data.capacityUnits; }
     public set capacityUnits(val: number | any) { this.setDataVal('capacityUnits', sys.board.valueMaps.volumeUnits.encode(val)); }
     public getHeatModes() { return sys.board.bodies.getHeatModes(this.id); }
+    public getHeatModesV2() { return sys.board.bodies.getHeatModesV2(this.id); }
     public getExtended() {
         let body = this.get(true);
         body.capacityUnits = sys.board.valueMaps.volumeUnits.transform(this.capacityUnits || 1);
@@ -1357,11 +1358,6 @@ export class Circuit extends EqItem implements ICircuit {
     public set connectionId(val: string) { this.setDataVal('connectionId', val); }
     public get deviceBinding(): string { return this.data.deviceBinding; }
     public set deviceBinding(val: string) { this.setDataVal('deviceBinding', val); }
-    // v3.004+ IntelliCenter: unique circuit identifier for Action 184 commands.
-    // Stored as 16-bit value (hi*256 + lo), e.g., Spa=43245 (168*256+237=0xA8ED), Pool=27873 (108*256+225=0x6CE1)
-    // Learned from OCP Action 184 broadcasts.
-    public get targetId(): number { return this.data.targetId; }
-    public set targetId(val: number) { this.setDataVal('targetId', val); }
     public get hasHeatSource() { return typeof sys.board.valueMaps.circuitFunctions.get(this.type || 0).hasHeatSource !== 'undefined' ? sys.board.valueMaps.circuitFunctions.get(this.type || 0).hasHeatSource : false };
     public getLightThemes() {
         // Lets do this universally driven by the metadata.
