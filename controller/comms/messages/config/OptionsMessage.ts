@@ -89,7 +89,14 @@ export class OptionsMessage {
                             //sys.general.options.airTempAdj = (msg.extractPayloadByte(5) & 0x007F) * (((msg.extractPayloadByte(5) & 0x0080) > 0) ? -1 : 1);
                             //sys.general.options.waterTempAdj2 = (msg.extractPayloadByte(6) & 0x007F) * (((msg.extractPayloadByte(6) & 0x0080) > 0) ? -1 : 1);
 
-                            // Somewhere in here are the units.
+                            const unitsRaw = msg.extractPayloadByte(isIntellicenterV3 ? 31 : 32, 255);
+                            if (unitsRaw === 0 || unitsRaw === 1) {
+                                const mappedUnits = unitsRaw === 1
+                                    ? sys.board.valueMaps.tempUnits.getValue('C')
+                                    : sys.board.valueMaps.tempUnits.getValue('F');
+                                sys.general.options.units = mappedUnits;
+                                state.temps.units = mappedUnits;
+                            }
 
                             // v3.004+: payload layout shifted by 1 byte vs v1.x (timestamp insertion earlier in the packet).
                             // Evidence: replay.21 Action 30 type 0 has [.., 85,100,94,103, 3,3 ..] at bytes 19-24.

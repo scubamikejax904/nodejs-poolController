@@ -120,18 +120,26 @@ export class PumpMessage {
             let circuitId = 1;
             pumpId = msgId + 1;
             pump = sys.pumps.getItemById(pumpId);
-            if (pump.type === 1) { // If this is a single speed pump it will have the body stored in the first circuit position.  All other pumps have no
-                // reference to the body.
+            const pumpType = sys.board.valueMaps.pumpTypes.transform(pump.type);
+            const hasBodyAssociation = pumpType.hasBody === true;
+            const isDualSpeed = pumpType.name === 'ds';
+            if (hasBodyAssociation) {
+                // SS/DS pumps include a body association byte before circuit assignments.
                 pump.body = msg.extractPayloadByte(34);
+            }
+            if (pumpType.name === 'ss') {
                 // Clear the circuits as there should be none.
                 pump.circuits.clear();
             }
             else if (pump.type !== 0 && typeof pump.type !== 'undefined') {
-                for (let i = 34; i < msg.payload.length && circuitId <= sys.board.valueMaps.pumpTypes.get(pump.type).maxCircuits; i++) {
+                const circuitStartNdx = isDualSpeed && hasBodyAssociation ? 35 : 34;
+                const maxCircuits = isDualSpeed && hasBodyAssociation ? Math.max((pumpType.maxCircuits || 0) - 1, 0) : (pumpType.maxCircuits || 0);
+                for (let i = circuitStartNdx; i < msg.payload.length && circuitId <= maxCircuits; i++) {
                     let circuit = msg.extractPayloadByte(i);
                     if (circuit !== 255) pump.circuits.getItemById(circuitId++, true).circuit = circuit + 1;
                     else pump.circuits.removeItemById(circuitId++);
                 }
+                while (circuitId <= 8) pump.circuits.removeItemById(circuitId++);
             }
             // Speed/Flow
             if (pump.type > 2) {

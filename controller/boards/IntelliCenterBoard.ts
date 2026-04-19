@@ -110,6 +110,7 @@ export class IntelliCenterBoard extends SystemBoard {
             [5, { name: 'hybrid', desc: 'Hybrid', hasAddress: true }],
             [6, { name: 'mastertemp', desc: 'MasterTemp', hasAddress: true }],
             [7, { name: 'maxetherm', desc: 'Max-E-Therm', hasAddress: true }],
+            [8, { name: 'eti250', desc: 'ETI250', hasAddress: true }],
         ]);
 
 
@@ -258,11 +259,13 @@ export class IntelliCenterBoard extends SystemBoard {
             [0, { name: 'off', desc: 'Off' }],
             [1, { name: 'heater', desc: 'Heater' }],
             [2, { name: 'solar', desc: 'Solar' }],
-            [3, { name: 'cooling', desc: 'Cooling' }],
-            [4, { name: 'hpheat', desc: 'Heating' }],
+            [3, { name: 'hpheat', desc: 'Heating' }],
+            [4, { name: 'utheat', desc: 'Heating' }],
             [5, { name: 'hybheat', desc: 'Heating' }],
             [6, { name: 'mtheat', desc: 'Heater' }],
-            [8, { name: 'hpcool', desc: 'Cooling' }]
+            [7, { name: 'meheat', desc: 'Heater' }],
+            [8, { name: 'eti250heat', desc: 'Heating' }],
+            [9, { name: 'utcool', desc: 'Cooling' }]
         ]);
         this.valueMaps.scheduleTypes = new byteValueMap([
             [0, { name: 'runonce', desc: 'Run Once', startDate: true, startTime: true, endTime: true, days: false, heatSource: true, heatSetpoint: true }],
@@ -1592,6 +1595,77 @@ class IntelliCenterSystemCommands extends SystemCommands {
                 if (obj.clockSource === 'internet' || obj.clockSource === 'server' || obj.clockSource === 'manual')
                     sys.general.options.clockSource = obj.clockSource;
                 sys.board.system.setTZ();
+            }
+            if (typeof obj.units !== 'undefined') {
+                const requestedUnits = sys.board.valueMaps.tempUnits.encode(obj.units);
+                if (!isNaN(requestedUnits) && requestedUnits !== sys.general.options.units) {
+                    // OCP encodes units as 0=English/Fahrenheit, 1=Metric/Celsius.
+                    const unitsByte = requestedUnits === sys.board.valueMaps.tempUnits.getValue('C') ? 1 : 0;
+                    if (isIntellicenterV3) {
+                        // v3.008 full-options frame: OCP only accepts units changes via the wireless-remote
+                        // A168 type=0 template (setpoints at [20..23], modes at [24..25], 15 at [26], units at [32]).
+                        // The sensor-calibration payload above has a different byte layout and the OCP ignores it
+                        // for units changes. Build a fresh frame here and send it to OCP (dest=16).
+                        // Setpoints are converted to target units so byte[32] is internally consistent.
+                        const fromUnitName = sys.board.valueMaps.tempUnits.getName(sys.general.options.units) || 'F';
+                        const toUnitName = unitsByte === 1 ? 'C' : 'F';
+                        const convertSetpoint = (val: number): number => {
+                            if (typeof val !== 'number' || isNaN(val)) return 0;
+                            if (fromUnitName === toUnitName) return val;
+                            return Math.round(utils.convert.temperature.convertUnits(val, fromUnitName, toUnitName));
+                        };
+                        const poolHeat = convertSetpoint(pool.setPoint || (unitsByte === 1 ? 26 : 78));
+                        const poolCool = convertSetpoint(pool.coolSetpoint || (pool.setPoint || (unitsByte === 1 ? 35 : 95)));
+                        const spaHeat = convertSetpoint(spa.setPoint || (unitsByte === 1 ? 35 : 95));
+                        const spaCool = convertSetpoint(spa.coolSetpoint || (spa.setPoint || (unitsByte === 1 ? 35 : 95)));
+                        const dt = new Date();
+                        const yy = dt.getFullYear() - 2000;
+                        const mm = dt.getMonth() + 1;
+                        const dd = dt.getDate();
+                        const hh = dt.getHours();
+                        const min = dt.getMinutes();
+                        const v3UnitsPayload = [
+                            0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0,
+                            160, yy, mm, dd, hh, min,
+                            poolHeat, poolCool, spaHeat, spaCool,
+                            pool.heatMode || 0, spa.heatMode || 0,
+                            15,
+                            0, 0, 0, 0, 0,
+                            unitsByte,
+                            0, 0, 0, 0, 0, 0, 0, 0
+                        ];
+                        let out = Outbound.create({
+                            dest: 16,
+                            action: 168,
+                            retries: 5,
+                            payload: v3UnitsPayload,
+                            response: IntelliCenterBoard.getAckResponse(168)
+                        });
+                        await out.sendAsync();
+                        // Apply converted setpoints locally so state matches the frame we sent to OCP.
+                        const sbody1 = state.temps.bodies.getItemById(1);
+                        pool.setPoint = sbody1.setPoint = poolHeat;
+                        pool.coolSetpoint = sbody1.coolSetpoint = poolCool;
+                        if (sys.bodies.length > 1) {
+                            const sbody2 = state.temps.bodies.getItemById(2);
+                            spa.setPoint = sbody2.setPoint = spaHeat;
+                            spa.coolSetpoint = sbody2.coolSetpoint = spaCool;
+                        }
+                    } else {
+                        payload[2] = 29;
+                        payload[31] = unitsByte;
+                        let out = Outbound.create({
+                            action: 168,
+                            retries: 5,
+                            payload: payload,
+                            response: IntelliCenterBoard.getAckResponse(168)
+                        });
+                        await out.sendAsync();
+                    }
+                    sys.general.options.units = requestedUnits;
+                    state.temps.units = requestedUnits;
+                    state.emitEquipmentChanges();
+                }
             }
             if (isIntellicenterV3) {
                 const requestedFreezeCycleTime = typeof obj.freezeCycleTime !== 'undefined'
@@ -3399,6 +3473,25 @@ class IntelliCenterPumpCommands extends PumpCommands {
             let outn = Outbound.create({ dest, action: 168, payload: [4, 1, id - 1] });
             outn.appendPayloadBytes(0, 16);
             outn.appendPayloadString(data.name, 16, pump.name || type.name);
+            const isDualSpeed = type.name === 'ds';
+            const circuitPayloadNdx = isDualSpeed ? 19 : 18;
+            const unitsPayloadNdx = isDualSpeed ? 27 : 26;
+            const maxPayloadCircuits = isDualSpeed ? 7 : 8;
+            const poolBody = sys.board.valueMaps.pumpBodies.getValue('pool');
+            const spaBody = sys.board.valueMaps.pumpBodies.getValue('spa');
+            const poolSpaBody = sys.board.valueMaps.pumpBodies.getValue('poolspa');
+            const normalizeBody = (body: number) => {
+                if (body === 1) return poolBody;
+                if (body === 2) return spaBody;
+                if (body === 32) return poolSpaBody;
+                return body;
+            };
+            const requestedBody = normalizeBody(sys.board.valueMaps.pumpBodies.encode(data.body));
+            const currentBody = normalizeBody(sys.board.valueMaps.pumpBodies.encode(pump.body));
+            const bodyPayload = (!isNaN(requestedBody) && sys.board.valueMaps.pumpBodies.valExists(requestedBody))
+                ? requestedBody
+                : ((!isNaN(currentBody) && sys.board.valueMaps.pumpBodies.valExists(currentBody)) ? currentBody : poolBody);
+            if (isDualSpeed) outc.setPayloadByte(18, bodyPayload);
             if (type.name === 'ss') {
                 outc.setPayloadByte(5, 0); // Clear the pump address
 
@@ -3422,7 +3515,7 @@ class IntelliCenterPumpCommands extends PumpCommands {
                 outc.setPayloadByte(15, 10);
                 outc.setPayloadByte(16, 1);
                 outc.setPayloadByte(17, 5);
-                outc.setPayloadByte(18, data.body, pump.body);
+                outc.setPayloadByte(18, bodyPayload);
                 outc.setPayloadByte(26, 0);
                 if (isV3) outn.setPayloadIntBE(3, 0); else outn.setPayloadInt(3, 0);
                 for (let i = 1; i < 8; i++) {
@@ -3436,24 +3529,24 @@ class IntelliCenterPumpCommands extends PumpCommands {
                 // Add in all the circuits
                 if (typeof data.circuits === 'undefined') {
                     // The endpoint isn't changing the circuits and is just setting the attributes.
-                    for (let i = 0; i < 8; i++) {
+                    for (let i = 0; i < maxPayloadCircuits; i++) {
                         let circ = pump.circuits.getItemByIndex(i, false, { circuit: 255 });
                         circ.id = i + 1;
-                        outc.setPayloadByte(i + 18, circ.circuit);
+                        outc.setPayloadByte(i + circuitPayloadNdx, circ.circuit);
                     }
                 }
                 else {
                     if (typeof type.maxCircuits !== 'undefined' && type.maxCircuits > 0) {
-                        for (let i = 0; i < 8; i++) {
+                        for (let i = 0; i < maxPayloadCircuits; i++) {
                             let circ = pump.circuits.getItemByIndex(i, false, { circuit: 255 });
                             if (i >= data.circuits.length) {
                                 // The incoming data does not include this circuit so we will set it to 255.
-                                outc.setPayloadByte(i + 18, 255);
+                                outc.setPayloadByte(i + circuitPayloadNdx, 255);
                                 if (typeof type.minSpeed !== 'undefined')
                                     isV3 ? outn.setPayloadIntBE((i * 2) + 3, type.minSpeed) : outn.setPayloadInt((i * 2) + 3, type.minSpeed);
                                 else if (typeof type.minFlow !== 'undefined') {
                                     isV3 ? outn.setPayloadIntBE((i * 2) + 3, type.minFlow) : outn.setPayloadInt((i * 2) + 3, type.minFlow);
-                                    outc.setPayloadByte(i + 26, 1);
+                                    outc.setPayloadByte(i + unitsPayloadNdx, 1);
                                 }
                                 else
                                     isV3 ? outn.setPayloadIntBE((i * 2) + 3, 0) : outn.setPayloadInt((i * 2) + 3, 0);
@@ -3462,20 +3555,40 @@ class IntelliCenterPumpCommands extends PumpCommands {
                                 let c = data.circuits[i];
                                 let speed = parseInt(c.speed, 10);
                                 let flow = parseInt(c.flow, 10);
+                                let existingSpeed = parseInt(circ.speed as any, 10);
+                                let existingFlow = parseInt(circ.flow as any, 10);
                                 let circuit = i < type.maxCircuits ? parseInt(c.circuit, 10) : 256;
-                                let units;
-                                if (type.name === 'vf') units = sys.board.valueMaps.pumpUnits.getValue('gpm');
-                                else if (type.name === 'vs') units = sys.board.valueMaps.pumpUnits.getValue('rpm');
-                                else units = sys.board.valueMaps.pumpUnits.encode(c.units);
-                                if (isNaN(units)) units = sys.board.valueMaps.pumpUnits.getValue('rpm');
-                                outc.setPayloadByte(i + 18, circuit - 1, circ.circuit - 1);
-                                if (typeof type.minSpeed !== 'undefined' && (parseInt(c.units, 10) === 0 || isNaN(parseInt(c.units, 10)))) {
-                                    outc.setPayloadByte(i + 26, 0); // Set to rpm
-                                    isV3 ? outn.setPayloadIntBE((i * 2) + 3, Math.max(speed, type.minSpeed), circ.speed) : outn.setPayloadInt((i * 2) + 3, Math.max(speed, type.minSpeed), circ.speed);
+                                let currentCircuit = parseInt(circ.circuit as any, 10);
+                                let circuitByte = !isNaN(circuit) ? circuit - 1 : (!isNaN(currentCircuit) ? currentCircuit - 1 : 255);
+                                if (isNaN(circuitByte) || circuitByte < 0 || circuitByte > 255) circuitByte = 255;
+                                const rpmUnits = sys.board.valueMaps.pumpUnits.getValue('rpm');
+                                const gpmUnits = sys.board.valueMaps.pumpUnits.getValue('gpm');
+                                let units: number;
+                                if (type.name === 'vf') units = gpmUnits;
+                                else if (type.name === 'vs') units = rpmUnits;
+                                else {
+                                    units = sys.board.valueMaps.pumpUnits.encode(c.units);
+                                    if (isNaN(units)) units = parseInt(circ.units as any, 10);
+                                    if (isNaN(units)) units = !isNaN(flow) && isNaN(speed) ? gpmUnits : rpmUnits;
                                 }
-                                else if (typeof type.minFlow !== 'undefined' && (parseInt(c.units, 10) === 1 || isNaN(parseInt(c.units, 10)))) {
-                                    outc.setPayloadByte(i + 26, 1); // Set to gpm
-                                    isV3 ? outn.setPayloadIntBE((i * 2) + 3, Math.max(flow, type.minFlow), circ.flow) : outn.setPayloadInt((i * 2) + 3, Math.max(flow, type.minFlow), circ.flow);
+                                // If the units marker and provided values disagree, prefer the populated value to avoid
+                                // emitting NaN bytes in the outbound Action 168 payload.
+                                if (units === rpmUnits && isNaN(speed) && !isNaN(flow)) units = gpmUnits;
+                                else if (units === gpmUnits && isNaN(flow) && !isNaN(speed)) units = rpmUnits;
+                                outc.setPayloadByte(i + circuitPayloadNdx, circuitByte, 255);
+                                if (typeof type.minSpeed !== 'undefined' && units === rpmUnits) {
+                                    outc.setPayloadByte(i + unitsPayloadNdx, 0); // Set to rpm
+                                    const minSpeed = (typeof type.minSpeed === 'number' && !isNaN(type.minSpeed)) ? type.minSpeed : 450;
+                                    const speedCandidate = !isNaN(speed) ? speed : existingSpeed;
+                                    const safeSpeed = !isNaN(speedCandidate) ? Math.max(speedCandidate, minSpeed) : minSpeed;
+                                    isV3 ? outn.setPayloadIntBE((i * 2) + 3, safeSpeed, minSpeed) : outn.setPayloadInt((i * 2) + 3, safeSpeed, minSpeed);
+                                }
+                                else if (typeof type.minFlow !== 'undefined' && units === gpmUnits) {
+                                    outc.setPayloadByte(i + unitsPayloadNdx, 1); // Set to gpm
+                                    const minFlow = (typeof type.minFlow === 'number' && !isNaN(type.minFlow)) ? type.minFlow : 15;
+                                    const flowCandidate = !isNaN(flow) ? flow : existingFlow;
+                                    const safeFlow = !isNaN(flowCandidate) ? Math.max(flowCandidate, minFlow) : minFlow;
+                                    isV3 ? outn.setPayloadIntBE((i * 2) + 3, safeFlow, minFlow) : outn.setPayloadInt((i * 2) + 3, safeFlow, minFlow);
                                 }
                             }
                         }
@@ -3500,7 +3613,7 @@ class IntelliCenterPumpCommands extends PumpCommands {
                 pump.minFlow = type.minFlow, 0;
                 pump.maxFlow = type.maxFlow, 130;
                 pump.circuits.clear();
-                if (typeof data.body !== 'undefined') pump.body = parseInt(data.body, 10);
+                if (typeof data.body !== 'undefined') pump.body = bodyPayload;
             }
             else if (type.name === 'ds') {
                 pump.address = undefined;
@@ -3510,7 +3623,7 @@ class IntelliCenterPumpCommands extends PumpCommands {
                 pump.maxSpeed = type.maxSpeed || 3450;
                 pump.minFlow = type.minFlow, 0;
                 pump.maxFlow = type.maxFlow, 130;
-                if (typeof data.body !== 'undefined') pump.body = parseInt(data.body, 10);
+                if (typeof data.body !== 'undefined') pump.body = bodyPayload;
             }
             else {
                 if (typeof data.address !== 'undefined') pump.address = data.address;
@@ -3526,8 +3639,9 @@ class IntelliCenterPumpCommands extends PumpCommands {
             if (typeof data.circuits !== 'undefined' && type.name !== 'undefined') {
                 // Set all the circuits
                 let id = 1;
+                const maxConfigCircuits = type.name === 'ds' ? 7 : 8;
                 for (let i = 0; i < 8; i++) {
-                    if (i >= data.circuits.length) pump.circuits.removeItemByIndex(i);
+                    if (i >= maxConfigCircuits || i >= data.circuits.length) pump.circuits.removeItemByIndex(i);
                     else {
                         let c = data.circuits[i];
                         let circuitId = parseInt(c.circuit, 10);
@@ -3559,8 +3673,9 @@ class IntelliCenterPumpCommands extends PumpCommands {
             if (type.name !== 'ss') {
                 if (typeof data.circuits !== 'undefined') {
                     // Set all the circuits
+                    const maxConfigCircuits = type.name === 'ds' ? 7 : 8;
                     for (let i = 0; i < 8; i++) {
-                        if (i >= data.circuits.length) pump.circuits.removeItemByIndex(i);
+                        if (i >= maxConfigCircuits || i >= data.circuits.length) pump.circuits.removeItemByIndex(i);
                         else {
                             let c = data.circuits[i];
                             let circuitId = typeof c.circuit !== 'undefined' ? parseInt(c.circuit, 10) : pump.circuits.getItemById(i, false).circuit;
@@ -4027,7 +4142,7 @@ class IntelliCenterBodyCommands extends BodyCommands {
         sys.board.heaters.updateHeaterServices();
         let heatModes = [];
         let heatTypes = (sys.board.heaters as IntelliCenterHeaterCommands).getInstalledHeaterTypesV2(bodyId);
-        let combustionInstalled = (heatTypes.gas > 0 || heatTypes.mastertemp > 0 || heatTypes.maxetherm > 0);
+        let combustionInstalled = (heatTypes.gas > 0 || heatTypes.mastertemp > 0 || heatTypes.maxetherm > 0 || heatTypes.eti250 > 0);
         heatModes.push(this.board.valueMaps.heatSources.transformByName('off'));
         if (heatTypes.hybrid > 0) {
             heatModes.push(this.board.valueMaps.heatSources.transformByName('hybheat'));
@@ -4038,6 +4153,7 @@ class IntelliCenterBodyCommands extends BodyCommands {
         if (heatTypes.gas > 0) heatModes.push(this.board.valueMaps.heatSources.transformByName('heater'));
         if (heatTypes.mastertemp > 0) heatModes.push(this.board.valueMaps.heatSources.transformByName('mtheater'));
         if (heatTypes.maxetherm > 0) heatModes.push(this.board.valueMaps.heatSources.transformByName('maxetherm'));
+        if (heatTypes.eti250 > 0) heatModes.push(this.board.valueMaps.heatSources.transformByName('eti250'));
         if (heatTypes.solar > 0) {
             heatModes.push(this.board.valueMaps.heatSources.transformByName('solar'));
             if (combustionInstalled) heatModes.push(this.board.valueMaps.heatSources.transformByName('solarpref'));
@@ -4485,7 +4601,8 @@ class IntelliCenterHeaterCommands extends HeaterCommands {
         let ultratempInstalled = htypes.ultratemp > 0;
         let mastertempInstalled = htypes.mastertemp > 0;
         let maxethermInstalled = htypes.maxetherm > 0;
-        let combustionHeaterInstalled = gasHeaterInstalled || mastertempInstalled || maxethermInstalled;
+        let eti250Installed = htypes.eti250 > 0;
+        let combustionHeaterInstalled = gasHeaterInstalled || mastertempInstalled || maxethermInstalled || eti250Installed;
 
 
         // RKS: 09-26-20 This is a hack to maintain backward compatability with fw versions 1.04 and below.  Ultratemp is not
@@ -4533,14 +4650,16 @@ class IntelliCenterHeaterCommands extends HeaterCommands {
             if (gasHeaterInstalled) sys.board.valueMaps.heatSources.merge([[2, { name: 'heater', desc: 'Heater' }]]);
             if (mastertempInstalled) sys.board.valueMaps.heatSources.merge([[11, { name: 'mtheater', desc: 'MasterTemp' }]]);
             if (maxethermInstalled) sys.board.valueMaps.heatSources.merge([[12, { name: 'maxetherm', desc: 'Max-E-Therm' }]]);
-            // "Preferred" modes only appear when a combustion heater (gas/mastertemp/maxetherm) is installed —
+            if (eti250Installed) sys.board.valueMaps.heatSources.merge([[13, { name: 'eti250', desc: 'ETI250' }]]);
+            // "Preferred" modes only appear when a combustion heater (gas/mastertemp/maxetherm/eti250) is installed —
             // "preferred" means "prefer this source, fall back to combustion heater."
             if (solarInstalled && combustionHeaterInstalled) sys.board.valueMaps.heatSources.merge([[3, { name: 'solar', desc: 'Solar Only', hasCoolSetpoint: htypes.hasCoolSetpoint }], [4, { name: 'solarpref', desc: 'Solar Preferred', hasCoolSetpoint: htypes.hasCoolSetpoint }]]);
             else if (solarInstalled && htypes.total > 1) sys.board.valueMaps.heatSources.merge([[3, { name: 'solar', desc: 'Solar Only', hasCoolSetpoint: htypes.hasCoolSetpoint }]]);
             else if (solarInstalled) sys.board.valueMaps.heatSources.merge([[3, { name: 'solar', desc: 'Solar', hasCoolSetpoint: htypes.hasCoolSetpoint }]]);
             // v3.004+ uses val=14 for heat pump (v1.x used val=9)
             let hpVal = sys.equipment.isIntellicenterV3 ? 14 : 9;
-            if (heatPumpInstalled && combustionHeaterInstalled) sys.board.valueMaps.heatSources.merge([[hpVal, { name: 'heatpump', desc: 'Heat Pump Only' }], [25, { name: 'heatpumppref', desc: 'Heat Pump Preferred' }]]);
+            let hpPrefVal = sys.equipment.isIntellicenterV3 ? 15 : 25;
+            if (heatPumpInstalled && combustionHeaterInstalled) sys.board.valueMaps.heatSources.merge([[hpVal, { name: 'heatpump', desc: 'Heat Pump Only' }], [hpPrefVal, { name: 'heatpumppref', desc: 'Heat Pump Preferred' }]]);
             else if (heatPumpInstalled && htypes.total > 1) sys.board.valueMaps.heatSources.merge([[hpVal, { name: 'heatpump', desc: 'Heat Pump Only' }]]);
             else if (heatPumpInstalled) sys.board.valueMaps.heatSources.merge([[hpVal, { name: 'heatpump', desc: 'Heat Pump' }]]);
             if (ultratempInstalled && combustionHeaterInstalled) sys.board.valueMaps.heatSources.merge([[5, { name: 'ultratemp', desc: 'UltraTemp Only', hasCoolSetpoint: htypes.hasCoolSetpoint }], [6, { name: 'ultratemppref', desc: 'UltraTemp Preferred', hasCoolSetpoint: htypes.hasCoolSetpoint }]]);
@@ -4551,13 +4670,14 @@ class IntelliCenterHeaterCommands extends HeaterCommands {
             if (gasHeaterInstalled) sys.board.valueMaps.heatModes.merge([[2, { name: 'heater', desc: 'Heater' }]]);
             if (mastertempInstalled) sys.board.valueMaps.heatModes.merge([[11, { name: 'mtheater', desc: 'MasterTemp' }]]);
             if (maxethermInstalled) sys.board.valueMaps.heatModes.merge([[12, { name: 'maxetherm', desc: 'Max-E-Therm' }]]);
+            if (eti250Installed) sys.board.valueMaps.heatModes.merge([[13, { name: 'eti250', desc: 'ETI250' }]]);
             if (solarInstalled && combustionHeaterInstalled) sys.board.valueMaps.heatModes.merge([[3, { name: 'solar', desc: 'Solar Only' }], [4, { name: 'solarpref', desc: 'Solar Preferred' }]]);
             else if (solarInstalled && htypes.total > 1) sys.board.valueMaps.heatModes.merge([[3, { name: 'solar', desc: 'Solar Only' }]]);
             else if (solarInstalled) sys.board.valueMaps.heatModes.merge([[3, { name: 'solar', desc: 'Solar' }]]);
             if (ultratempInstalled && combustionHeaterInstalled) sys.board.valueMaps.heatModes.merge([[5, { name: 'ultratemp', desc: 'UltraTemp Only' }], [6, { name: 'ultratemppref', desc: 'UltraTemp Preferred' }]]);
             else if (ultratempInstalled && htypes.total > 1) sys.board.valueMaps.heatModes.merge([[5, { name: 'ultratemp', desc: 'UltraTemp Only' }]]);
             else if (ultratempInstalled) sys.board.valueMaps.heatModes.merge([[5, { name: 'ultratemp', desc: 'UltraTemp' }]]);
-            if (heatPumpInstalled && combustionHeaterInstalled) sys.board.valueMaps.heatModes.merge([[hpVal, { name: 'heatpump', desc: 'Heat Pump Only' }], [25, { name: 'heatpumppref', desc: 'Heat Pump Preferred' }]]);
+            if (heatPumpInstalled && combustionHeaterInstalled) sys.board.valueMaps.heatModes.merge([[hpVal, { name: 'heatpump', desc: 'Heat Pump Only' }], [hpPrefVal, { name: 'heatpumppref', desc: 'Heat Pump Preferred' }]]);
             else if (heatPumpInstalled && htypes.total > 1) sys.board.valueMaps.heatModes.merge([[hpVal, { name: 'heatpump', desc: 'Heat Pump Only' }]]);
             else if (heatPumpInstalled) sys.board.valueMaps.heatModes.merge([[hpVal, { name: 'heatpump', desc: 'Heat Pump' }]]);
 

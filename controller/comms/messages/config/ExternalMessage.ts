@@ -866,6 +866,14 @@ export class ExternalMessage {
             if (selected.freezeCycleTime !== 255) sys.general.options.freezeCycleTime = selected.freezeCycleTime;
             if (selected.freezeOverrideRaw !== 255) sys.general.options.freezeOverride = decodeFreezeOverride(selected.freezeOverrideRaw);
             if (selected.manualPriority !== 255) sys.general.options.manualPriority = selected.manualPriority > 0;
+            const unitsRaw = msg.extractPayloadByte(32 + selected.shift, 255);
+            if (unitsRaw === 0 || unitsRaw === 1) {
+                const mappedUnits = unitsRaw === 1
+                    ? sys.board.valueMaps.tempUnits.getValue('C')
+                    : sys.board.valueMaps.tempUnits.getValue('F');
+                sys.general.options.units = mappedUnits;
+                state.temps.units = mappedUnits;
+            }
             
             state.emitEquipmentChanges();
             msg.isProcessed = true;
