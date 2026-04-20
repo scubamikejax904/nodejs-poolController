@@ -65,6 +65,10 @@ export class VersionMessage {
         // v3.x: personal-information updates (Action 168 type 12) are not always reflected by
         // version deltas in the field; force a general refresh so category 12 is re-polled.
         sys.configVersion.general = 0;
+        // v3.004+: OCP does NOT reliably increment equipment version when body capacity changes
+        // via WCP/ICP (Action 168 type 13, sub 4-7). Force an equipment refresh so queueChanges()
+        // will request category 13 (subs 0/1/2/3 re-broadcast authoritative Action 30 cat 13). See ISSUE-073.
+        sys.configVersion.equipment = 0;
 
         // If a config queue run is already active, coalesce this refresh and retry after a short delay.
         // This avoids extra 228/164 churn in the middle of an in-flight loading pass.

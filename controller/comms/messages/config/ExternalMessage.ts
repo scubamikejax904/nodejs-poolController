@@ -47,6 +47,32 @@ export class ExternalMessage {
         // Only accept OCP-originated messages here. If/when OCP applies a request, it will broadcast authoritative
         // state/config via other message types (e.g., Action 30 / 204).
         if (sys.equipment.isIntellicenterV3 && msg.dest === 16 && msg.source !== 16) {
+            // ISSUE-073 exception: body capacity updates via Action 168 cat 13 sub 4-7 are NOT
+            // reliably reflected by a subsequent Action 30 cat 13 broadcast. In the field the OCP
+            // re-broadcasts [13,0] (Pool) ~20s after the change, but often NEVER re-broadcasts
+            // [13,1] (Spa). Decoding the capacity from the ICP's own Action 168 request (which the
+            // OCP is about to ACK) lets njsPC stay in sync without waiting on a broadcast that may
+            // never arrive. If the broadcast does arrive later, EquipmentMessage will overwrite with
+            // the same value.
+            if (msg.action === 168 && msg.extractPayloadByte(0) === 13) {
+                const sub = msg.extractPayloadByte(1, 0);
+                const selector = msg.extractPayloadByte(2, -1);
+                if (sub === 0 && selector >= 4 && selector <= 7) {
+                    // Payload layout: [13, 0, selector, capHi, capLo]
+                    // selector 4->body1 (Pool), 5->body2 (Spa or Pool2), 6->body3, 7->body4.
+                    const bodyId = selector - 3;
+                    if (sys.equipment.maxBodies >= bodyId) {
+                        const hi = msg.extractPayloadByte(3, 0);
+                        const lo = msg.extractPayloadByte(4, 0);
+                        const capacity = ((hi << 8) | lo) * 1000;
+                        const cbody = sys.bodies.getItemById(bodyId);
+                        if (typeof cbody !== 'undefined' && cbody.id === bodyId) {
+                            cbody.capacity = capacity;
+                            logger.silly(`v3.004+ ICP body capacity: body${bodyId} -> ${capacity} gal`);
+                        }
+                    }
+                }
+            }
             msg.isProcessed = true;
             return;
         }
@@ -536,7 +562,12 @@ export class ExternalMessage {
                 else if (bodyId === 0) bodyId = 1;
                 else if (bodyId === 3) bodyId = 4;
                 cbody = sys.bodies.getItemById(bodyId);
-                cbody.capacity = msg.extractPayloadByte(3) * 1000;
+                // v1.x only. On v3.004+ this path is unreachable because the Wireless/ICP->OCP
+                // early-return in processIntelliCenter intercepts the 168 (and decodes the BE16
+                // capacity there directly). See ISSUE-073.
+                if (!sys.equipment.isIntellicenterV3) {
+                    cbody.capacity = msg.extractPayloadByte(3) * 1000;
+                }
                 msg.isProcessed = true;
                 break;
             case 12: // Circuit notifications
