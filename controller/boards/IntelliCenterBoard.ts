@@ -1205,7 +1205,15 @@ class IntelliCenterConfigQueue extends ConfigQueue {
         sys.configVersion.lastUpdated = new Date();
         // Tell the system we are loading.
         state.status = sys.board.valueMaps.controllerStatus.transform(2, 0);
-        this.maybeQueueItems(curr.equipment, ver.equipment, ConfigCategories.equipment, [0, 1, 2, 3, 12, 13, 14, 15]);
+        // Alert notification pages 12-15 (circuit/pump/heater/chlorinator) were added to
+        // OCP firmware in the v3.004+ line. IntelliCenter v1.x firmware (e.g. v1.064) does
+        // not respond to Action 222 requests for these pages, so polling them causes a
+        // retry/abort loop that resets `configVersion.equipment` to 0 and re-queues every
+        // cycle. On v1.x rely on the Action 168 push path in ExternalMessage instead. #1172
+        const equipmentItems = sys.equipment.isIntellicenterV3
+            ? [0, 1, 2, 3, 12, 13, 14, 15]
+            : [0, 1, 2, 3];
+        this.maybeQueueItems(curr.equipment, ver.equipment, ConfigCategories.equipment, equipmentItems);
         this.maybeQueueItems(curr.options, ver.options, ConfigCategories.options, [0, 1]);
         if (this.compareVersions(curr.circuits, ver.circuits)) {
             let req = new IntelliCenterConfigRequest(ConfigCategories.circuits, ver.circuits, [0, 1, 2],
