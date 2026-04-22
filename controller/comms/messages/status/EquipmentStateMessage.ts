@@ -744,10 +744,78 @@ export class EquipmentStateMessage {
                     state.temps.bodies.getItemById(cover2.body + 1).isCovered = scover2.isClosed = (msg.extractPayloadByte(30) & 0x0002) > 0;
                 }
                 sys.board.schedules.syncScheduleStates();
+                // v3.004+ alert queue — decode the OCP "Status" badge bitmaps so
+                // state.equipment.messages mirrors what the physical OCP/ICP/Wireless
+                // panels surface. This lives on the same data path the Nixie REST
+                // heaters and RS-485 port already use (setMessageByCode / removeItemByCode),
+                // so dashPanel's sysMessageIcon picks it up automatically via `sysmessages`.
+                if (sys.controllerType === ControllerType.IntelliCenter && sys.equipment.isIntellicenterV3) {
+                    EquipmentStateMessage.processAlertQueue(msg);
+                }
                 msg.isProcessed = true;
                 state.emitEquipmentChanges();
                 break;
         }
+    }
+    // Decodes the OCP "Status" alert queue carried in Action 204 on IntelliCenter v3.004+.
+    // Bit / byte map (see .plan/ISSUES-3.md ISSUE-072 progress notes):
+    //   byte[31] — pumps 9–16 comms-lost bitmap (bit N → slot 9+N)
+    //   byte[32] — pumps 1–8  comms-lost bitmap (bit N → slot 1+N)
+    //   byte[33] — TBD (candidate: chlorinator / IntelliChem family bitmap)
+    //   byte[34] — "any heater alert" flag (0 or 1)
+    //   byte[36] — heaters 1–8 comms-lost bitmap (bit N → heater slot 1+N), working hypothesis:
+    //              mirrors the pump bitmap layout (user intuition reconfirmed 2026-04-20);
+    //              prior "family bitmap" theory was an artefact of the test topology (HP at slot 2,
+    //              3× UltraTemp at slots 4/5/6 going offline together).
+    //   byte[37]  — consistently 255 when alerts present — likely padding/reserved
+    //   byte[38], byte[39] — TBD (possibly heaters 9–16, or chlorinator/IntelliChem families)
+    // Alert detection window is device-dependent (pumps ~15–30s, heaters can be minutes);
+    // we decode whatever 204 reports and do not poll/spoof.
+    private static processAlertQueue(msg: Inbound) {
+        if (msg.payload.length < 40) return;
+        const syncAlert = (code: string, shouldExist: boolean, severity: string, message: string) => {
+            const exists = state.equipment.messages.exists((m: any) => m.code === code);
+            if (shouldExist && !exists) state.equipment.messages.setMessageByCode(code, severity, message);
+            else if (!shouldExist && exists) state.equipment.messages.removeItemByCode(code);
+        };
+        // One-time cleanup of legacy family-keyed codes from the earlier "family bitmap"
+        // hypothesis (pre-2026-04-20). These are never written by the current slot-indexed
+        // decoder, so any lingering entries in poolState.json are stale. removeItemByCode
+        // is a no-op (and does not emit) when the code is absent.
+        ['heater:hp:comms', 'heater:ut:comms', 'heater:unknown:comms'].forEach(c => {
+            if (state.equipment.messages.exists((m: any) => m.code === c)) {
+                state.equipment.messages.removeItemByCode(c);
+            }
+        });
+        // Pumps 1–16 (bytes 31/32). Bit-to-slot mapping is universal — even relay-only pump
+        // types fire the bit because OCP polls every configured slot regardless of type.
+        const pumpsLo = msg.extractPayloadByte(32, 0);
+        const pumpsHi = msg.extractPayloadByte(31, 0);
+        for (let slot = 1; slot <= 16; slot++) {
+            const byte = slot <= 8 ? pumpsLo : pumpsHi;
+            const bit = (slot - 1) % 8;
+            const isAlerting = (byte & (1 << bit)) !== 0;
+            const code = `pump:${slot}:comms`;
+            const pump = sys.pumps.getItemById(slot);
+            const name = pump && pump.isActive && pump.name ? pump.name : `Pump ${slot}`;
+            syncAlert(code, isAlerting, 'error', `Communication lost with ${name}`);
+        }
+        // Heaters 1–8 (byte 36) — slot-indexed, same layout the pumps use. Names come from
+        // the configured heater at each slot; code `heater:{slot}:comms` matches the existing
+        // Nixie REST producer in `controller/nixie/heaters/Heater.ts`, so OCP-broadcast and
+        // Nixie-REST comm-lost signals unify into a single message per heater.
+        const heaterByte = msg.extractPayloadByte(36, 0);
+        for (let slot = 1; slot <= 8; slot++) {
+            const bit = slot - 1;
+            const isAlerting = (heaterByte & (1 << bit)) !== 0;
+            const code = `heater:${slot}:comms`;
+            const heater = sys.heaters.getItemById(slot);
+            const name = heater && heater.isActive && heater.name ? heater.name : `Heater ${slot}`;
+            syncAlert(code, isAlerting, 'error', `Communication lost with ${name}`);
+        }
+        // Remaining bytes (33, 38, 39) + heaters 9–16 — not decoded yet. Intentionally NOT
+        // emitted to state.equipment.messages to avoid false positives. See ISSUE-072 progress
+        // notes for the remaining test plan (chlorinator / IntelliChem isolation, heater 9–16 probe).
     }
     private static processCircuitState(msg: Inbound) {
         // The way this works is that there is one byte per 8 circuits for a total of 5 bytes or 40 circuits.  The

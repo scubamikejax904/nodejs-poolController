@@ -828,6 +828,12 @@ export class EquipmentState extends EqState {
     public get maxLightGroups(): number { return this.data.maxLightGroups; }
     public set maxLightGroups(val: number) { this.setDataVal('maxLightGroups', val); }
     public get messages(): EquipmentMessages { return new EquipmentMessages(this.data, 'messages'); }
+    // Current runtime RS-485 bus address njsPC is using (the "plugin address").
+    // For IntelliCenter v3.004+ this can diverge from the configured value at runtime
+    // when the OCP converges njsPC onto the first ICP slot (32 vs 33). dashPanel uses
+    // this to dynamically render the "njsPC" label on whichever slot we're occupying.
+    public get pluginAddress(): number { return typeof this.data.pluginAddress === 'number' ? this.data.pluginAddress : undefined; }
+    public set pluginAddress(val: number) { this.setDataVal('pluginAddress', val); }
     // v3.004+ device registration state
     public get registration(): number {
         const reg = this.data.registration;

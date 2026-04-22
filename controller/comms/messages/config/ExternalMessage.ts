@@ -74,51 +74,25 @@ export class ExternalMessage {
                     }
                 }
             }
-            // ISSUE-078 Part B: chlorinator live-edit piggyback (Action 168 cat=7 sub=0).
-            // The OCP does NOT re-broadcast Action 30 cat=7 after a slider change; the wireless
-            // module streams A168 cat=7 updates per drag / body toggle. Without overhearing
-            // these, njsPC would lag the real state by up to a full Action 222 poll cycle.
-            // 13-byte payload confirmed via packetLog(2026-04-19_23-14-52).log:
-            //   [0]=cat 7, [1]=sub 0, [2]=selector (0 for single chlor on i8PS),
-            //   [3]=body (32=shared, 0 observed when user picked "Pool only" — NOT reliable as
-            //       the active-slot signal),
-            //   [4]=type,
-            //   [5]=poolSetpoint, [6]=spaSetpoint,
-            //   [7]=0, [8]=0,
-            //   [9]=superChlorHours,
-            //   [10]=slot-active flag (1=provisioned). Stayed 1 through body=32→0 toggle.
-            //   [11..12]=unknown (Part C).
-            // superChlor on-flag location on v3 is NOT yet characterised — deferred.
-            // Multi-chlor A168 layout (selector != 0) is also not characterised; bench is
-            // single-chlor i8PS.
+            // ISSUE-078 Part B: chlorinator live-edit piggyback (Action 168 cat=7 sub=0)
+            // — Wireless → OCP request direction. See processIntelliCenterV3Chlor168 for
+            // the validated decode and the rationale.
             if (msg.action === 168 && msg.extractPayloadByte(0) === 7 && msg.extractPayloadByte(1) === 0) {
-                const chlorId = 1;
-                const slotActive = msg.extractPayloadByte(10, 0) === 1;
-                if (!slotActive) {
-                    sys.chlorinators.removeItemById(chlorId);
-                    state.chlorinators.removeItemById(chlorId);
-                } else {
-                    const c = sys.chlorinators.getItemById(chlorId, true);
-                    const sc = state.chlorinators.getItemById(c.id, true);
-                    c.isActive = sc.isActive = true;
-                    c.master = 0;
-                    c.body = msg.extractPayloadByte(3, c.body || 0);
-                    c.type = msg.extractPayloadByte(4, c.type);
-                    if (!c.disabled && !c.isDosing) {
-                        c.poolSetpoint = msg.extractPayloadByte(5);
-                        c.spaSetpoint = msg.extractPayloadByte(6);
-                    }
-                    c.superChlorHours = msg.extractPayloadByte(9);
-                    c.address = 80;
-                    if (typeof c.name === 'undefined' || c.name === '') c.name = `Chlorinator ${chlorId}`;
-                    sc.body = c.body;
-                    sc.poolSetpoint = c.poolSetpoint;
-                    sc.spaSetpoint = c.spaSetpoint;
-                    sc.type = c.type;
-                    sc.superChlorHours = c.superChlorHours;
-                }
-                state.emitEquipmentChanges();
+                ExternalMessage.processIntelliCenterV3Chlor168(msg);
             }
+            msg.isProcessed = true;
+            return;
+        }
+        // ISSUE-078 Part D (defense-in-depth): OCP-originated Action 168 cat=7 sub=0 broadcasts
+        // (src=16, dest=15) were observed in `logs/packetLog(2026-04-19_19-16-39).log`. They
+        // bypass the Wireless→OCP guard above and would otherwise fall through to the v1.x
+        // `processChlorinator` below, which misdecodes bytes 7/8 and risks a remove if
+        // payload[10]=0 ever appears. Route them through the validated v3 decoder instead.
+        if (sys.equipment.isIntellicenterV3
+            && msg.action === 168
+            && msg.extractPayloadByte(0) === 7
+            && msg.extractPayloadByte(1) === 0) {
+            ExternalMessage.processIntelliCenterV3Chlor168(msg);
             msg.isProcessed = true;
             return;
         }
@@ -725,7 +699,59 @@ export class ExternalMessage {
         state.emitEquipmentChanges();
         msg.isProcessed = true;
     }
+    // ISSUE-078: Shared v3.008 Action 168 cat=7 sub=0 decoder. Invoked from two paths:
+    //   (Part B) Wireless → OCP request direction — gives fast live updates between 222 polls.
+    //   (Part D) OCP → broadcast (src=16, dest=15) — keeps decode correct when the OCP
+    //            itself rebroadcasts cat=7 (legacy processChlorinator misreads bytes 7/8 on v3).
+    // 13-byte payload layout confirmed via packetLog(2026-04-19_23-14-52).log:
+    //   [0]=cat 7, [1]=sub 0, [2]=selector (0 for single chlor on i8PS),
+    //   [3]=body (32=shared, 0 observed for "Pool only" — NOT reliable as the active-slot signal),
+    //   [4]=type,
+    //   [5]=poolSetpoint, [6]=spaSetpoint,
+    //   [7]=0, [8]=0,
+    //   [9]=superChlorHours,
+    //   [10]=slot-active flag (1=provisioned). Stayed 1 through body=32→0 toggle.
+    //   [11..12]=cover-closed IntelliChlor outputs per body (Part C / ISSUE-075).
+    // superChlor on-flag location on v3 is NOT yet characterised — deferred to Part C.
+    // Multi-chlor A168 layout (selector != 0) also not characterised; bench is single-chlor i8PS.
+    private static processIntelliCenterV3Chlor168(msg: Inbound) {
+        const chlorId = 1;
+        const slotActive = msg.extractPayloadByte(10, 0) === 1;
+        if (!slotActive) {
+            sys.chlorinators.removeItemById(chlorId);
+            state.chlorinators.removeItemById(chlorId);
+        } else {
+            const c = sys.chlorinators.getItemById(chlorId, true);
+            const sc = state.chlorinators.getItemById(c.id, true);
+            c.isActive = sc.isActive = true;
+            c.master = 0;
+            c.body = msg.extractPayloadByte(3, c.body || 0);
+            c.type = msg.extractPayloadByte(4, c.type);
+            if (!c.disabled && !c.isDosing) {
+                c.poolSetpoint = msg.extractPayloadByte(5);
+                c.spaSetpoint = msg.extractPayloadByte(6);
+            }
+            c.superChlorHours = msg.extractPayloadByte(9);
+            c.address = 80;
+            if (typeof c.name === 'undefined' || c.name === '') c.name = `Chlorinator ${chlorId}`;
+            sc.body = c.body;
+            sc.poolSetpoint = c.poolSetpoint;
+            sc.spaSetpoint = c.spaSetpoint;
+            sc.type = c.type;
+            sc.superChlorHours = c.superChlorHours;
+        }
+        state.emitEquipmentChanges();
+    }
     private static processChlorinator(msg: Inbound) {
+        // ISSUE-078 Part D: on IntelliCenter v3.008 the cat=7 sub=0 Action 168 payload is row-
+        // major stride-9 (see processIntelliCenterV3Chlor168). The legacy decoder below is
+        // column-major stride-4 — its byte offsets for bytes 7/8 misdecode on v3 (clobbering
+        // superChlor/superChlorHours). Any v3 A168 cat=7 that reaches here slipped past the
+        // dedicated v3 routes above; bail out rather than trash state.
+        if (sys.equipment.isIntellicenterV3) {
+            msg.isProcessed = true;
+            return;
+        }
         let isActive = msg.extractPayloadByte(10) > 0;
         let chlorId = msg.extractPayloadByte(2) + 1;
         let cfg = sys.chlorinators.getItemById(chlorId, isActive);

@@ -85,9 +85,29 @@ export class Message {
     public static setPluginAddress(address: number, reason = 'runtime update'): void {
         if (typeof address !== 'number' || !isFinite(address)) return;
         const normalized = Math.max(0, Math.min(255, Math.trunc(address)));
-        if (Message.pluginAddress === normalized) return;
-        logger.info(`Updating plugin address from ${Message.pluginAddress} to ${normalized} (${reason})`);
-        Message.pluginAddress = normalized;
+        if (Message.pluginAddress === normalized && Message.statePluginAddressInSync(normalized)) return;
+        if (Message.pluginAddress !== normalized) {
+            logger.info(`Updating plugin address from ${Message.pluginAddress} to ${normalized} (${reason})`);
+            Message.pluginAddress = normalized;
+        }
+        Message.syncPluginAddressToState(normalized);
+    }
+    // Publishes the current plugin address to state.equipment so dashPanel (and any
+    // socket listeners) can render the correct "njsPC" label for whichever RS-485
+    // slot we are currently occupying. Safe to call before state is constructed.
+    public static publishPluginAddress(): void {
+        Message.syncPluginAddressToState(Message.pluginAddress);
+    }
+    private static statePluginAddressInSync(val: number): boolean {
+        try { return !!(state && state.equipment && state.equipment.pluginAddress === val); }
+        catch (_err) { return false; }
+    }
+    private static syncPluginAddressToState(val: number): void {
+        try {
+            if (state && state.equipment && state.equipment.pluginAddress !== val) {
+                state.equipment.pluginAddress = val;
+            }
+        } catch (_err) { /* state not ready yet; will be synced on next call */ }
     }
     public portId = 0; // This will be the target or source port for the message.  If this is from or to an Aux RS485 port the value will be > 0.
     public timestamp: Date = new Date();

@@ -190,6 +190,7 @@ export class Connection {
     }
     public async initAsync() {
         try {
+            Message.publishPluginAddress();
             // So now that we are now allowing multiple comm ports we need to initialize each one.  We are keeping the comms section from the config.json
             // simply because I have no idea what the Docker folks do with this.  So the default comms will be the one with an OCP or if there are no aux ports.
             let cfg = config.getSection('controller');
